@@ -1,0 +1,4 @@
+# Local mock creds + generated WireGuard keys — never commit.
+.env
+STATUS.md
+README.md

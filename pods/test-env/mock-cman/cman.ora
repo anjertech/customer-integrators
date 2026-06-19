@@ -1,0 +1,21 @@
+# Oracle Connection Manager config for the mock client environment.
+# CMAN listens on 6223 and relays SOURCE_ROUTE connections to the next hop
+# (the mock Oracle at 192.168.11.46:1521). The accept-all rule is fine for a local mock.
+
+cman_mock =
+  (configuration=
+    (address=(protocol=tcp)(host=0.0.0.0)(port=6223))
+    (rule_list=
+      (rule=(src=*)(dst=*)(srv=*)(act=accept))
+    )
+    (parameter_list=
+      (max_connections=256)
+      (idle_timeout=0)
+      (inbound_connect_timeout=0)
+      (session_timeout=0)
+      (outbound_connect_timeout=0)
+      (max_gateway_processes=8)
+      (min_gateway_processes=2)
+      (log_level=admin)
+    )
+  )

@@ -1,0 +1,131 @@
+name: presa-test-env
+
+# Simulated client environment: the REAL worker + vpn-sidecar tested end-to-end against
+# mock services behind a real WireGuard tunnel. See README.md / STATUS.md.
+#
+# Networks:
+#   vpn_transit    - the "internet" hop (worker/sidecar/gateway). Auto-assigned subnet.
+#   client_private - the client's private LAN, reachable ONLY through the VPN.
+#                    Sized /23 to cover the script's 192.168.10.x/.11.x without
+#                    hijacking the host's own 192.168.x route.
+
+networks:
+  vpn_transit:
+    driver: bridge
+  client_private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.10.0/23
+          gateway: 192.168.10.1
+
+services:
+  # ── client side (private network, only reachable via the VPN) ────────────────
+  mock-oracle:
+    image: gvenzl/oracle-free:slim-faststart
+    platform: linux/amd64
+    environment:
+      ORACLE_PASSWORD: ${ORACLE_SYS_PASSWORD}
+      ORACLE_DATABASE: SISTEMAS
+      APP_USER: PRESA
+      APP_USER_PASSWORD: ${APP_USER_PASSWORD}
+    # The slim image has no built-in healthcheck; define a real readiness probe so the
+    # worker's `depends_on: service_healthy` waits until SISTEMAS actually accepts PRESA.
+    healthcheck:
+      test: ["CMD-SHELL", "echo \"select 'HC_OK' from dual;\" | sqlplus -s PRESA/${APP_USER_PASSWORD}@//localhost:1521/SISTEMAS | grep -q HC_OK || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+    networks:
+      client_private:
+        ipv4_address: 192.168.11.46
+
+  mock-jump:
+    build: ./mock-jump
+    image: presa/mock-jump:local
+    platform: linux/amd64
+    environment:
+      SSH_USER: PRESA
+      SSH_PASSWORD: ${SSH_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/22' 2>/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      client_private:
+        ipv4_address: 192.168.10.83
+
+  # ── the VPN gateway (stands in for the FortiGate; bridges the two networks) ───
+  wg-gateway:
+    build: ./wg-gateway
+    image: presa/wg-gateway:local
+    platform: linux/amd64
+    environment:
+      WG_SERVER_PRIVATE_KEY: ${WG_SERVER_PRIVATE_KEY}
+      WG_CLIENT_PUBLIC_KEY: ${WG_CLIENT_PUBLIC_KEY}
+      PRIVATE_CIDR: 192.168.10.0/23
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "wg show wg0 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks: [vpn_transit, client_private]
+
+  # ── the REAL worker stack under test ─────────────────────────────────────────
+  vpn-sidecar:
+    build: ../vpn-sidecar
+    image: presa/vpn-sidecar:local
+    platform: linux/amd64
+    environment:
+      VPN_PROVIDER: wireguard
+      WG_CLIENT_PRIVATE_KEY: ${WG_CLIENT_PRIVATE_KEY}
+      WG_SERVER_PUBLIC_KEY: ${WG_SERVER_PUBLIC_KEY}
+      WG_ENDPOINT: "wg-gateway:51820"
+      WG_ALLOWED_IPS: 192.168.10.0/23
+      SSH_HOST: 192.168.10.83
+      SSH_USER: PRESA
+      SSH_PASSWORD: ${SSH_PASSWORD}
+      VPN_ROUTES: "192.168.10.0/24 192.168.11.0/24"
+      # First test: a DIRECT DB (no CMAN). Forward 16224 -> the mock Oracle.
+      SSH_FORWARDS: "16224:192.168.11.46:1521"
+      TUNNEL_READY_PORT: "16224"
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 5s
+      timeout: 3s
+      retries: 36
+      start_period: 20s
+    depends_on:
+      wg-gateway: { condition: service_healthy }
+      mock-jump:  { condition: service_healthy }
+    networks: [vpn_transit]
+    restart: "no"
+
+  worker:
+    build: ../worker
+    image: presa/worker:local
+    platform: linux/amd64
+    network_mode: "service:vpn-sidecar"
+    depends_on:
+      vpn-sidecar: { condition: service_healthy }
+      mock-oracle: { condition: service_healthy }
+    environment:
+      ORACLE_PASSWORD: ${APP_USER_PASSWORD}
+      TUNNEL_READY_PORT: "16224"
+    volumes:
+      - ../../test_oracle_connection.py:/scripts/test_oracle_connection.py:ro
+      - ../../oracle_client.py:/scripts/oracle_client.py:ro
+    command: ["--tenant", "carone", "--script", "/scripts/test_oracle_connection.py", "--db", "P_COAME_CHEVRO_NOGALAR"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"

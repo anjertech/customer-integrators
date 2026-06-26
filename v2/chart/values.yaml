@@ -1,0 +1,37 @@
+namespace:
+  # false by default: create + label the namespace out-of-band so the PSS label is
+  # set deterministically and Helm can store the release in it (see chart README).
+  create: false
+  name: etl
+
+# Container registry (dev account default; override per environment).
+image:
+  registry: 853982915722.dkr.ecr.us-east-2.amazonaws.com
+  pullPolicy: IfNotPresent
+  orchestrator:
+    repository: orchestrator
+    tag: latest
+  worker:
+    repository: worker
+    tag: latest
+  vpnSidecar:
+    repository: vpn-sidecar # NOTE: add this ECR repo in the infra (see chart README)
+    tag: latest
+
+# Orchestrator CronJob
+schedule: "0 6 * * *" # daily 06:00 UTC
+concurrencyPolicy: Forbid
+
+# VPN sidecar. Set false to run workers WITHOUT the sidecar — for validating the
+# EKS pipeline against an in-cluster mock Oracle before you have client creds.
+vpn:
+  enabled: true
+
+region: us-east-2
+tenantsS3: s3://presa-etl/tenants.json
+scriptsS3Prefix: s3://presa-etl/scripts
+
+# Must match the names the EKS Pod Identity associations were created with.
+serviceAccounts:
+  orchestrator: orchestrator
+  worker: worker

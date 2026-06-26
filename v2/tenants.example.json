@@ -1,0 +1,14 @@
+{
+  "tenants": [
+    {
+      "id": "P_COMON_MG_MG",
+      "enabled": true,
+      "script": "gmuni/orders.py"
+    },
+    {
+      "id": "P_CUALE_KIA_LAREDO",
+      "enabled": false,
+      "script": "universidad/orders.py"
+    }
+  ]
+}

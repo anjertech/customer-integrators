@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: presa-etl-orchestrator
+  namespace: {{ .Values.namespace.name }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: presa-etl
+            component: orchestrator
+        spec:
+          serviceAccountName: {{ .Values.serviceAccounts.orchestrator }}
+          restartPolicy: Never
+          containers:
+            - name: orchestrator
+              image: {{ include "presa-etl.image.orchestrator" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                - name: NAMESPACE
+                  value: {{ .Values.namespace.name | quote }}
+                - name: TENANTS_S3
+                  value: {{ .Values.tenantsS3 | quote }}
+                - name: SCRIPTS_S3_PREFIX
+                  value: {{ .Values.scriptsS3Prefix | quote }}
+                - name: AWS_REGION
+                  value: {{ .Values.region | quote }}
+                - name: VPN_ENABLED
+                  value: {{ .Values.vpn.enabled | quote }}
+                # Passed through to the worker Job template (${IMAGE_*}).
+                - name: IMAGE_WORKER
+                  value: {{ include "presa-etl.image.worker" . | quote }}
+                - name: IMAGE_VPN_SIDECAR
+                  value: {{ include "presa-etl.image.vpnSidecar" . | quote }}
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 256Mi

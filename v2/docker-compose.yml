@@ -1,0 +1,58 @@
+# Local full-chain connectivity test: vpn-sidecar + worker as "two containers in
+# one pod". The worker shares the sidecar's network namespace, so it sees `ppp0`
+# and any SSH forwards on localhost — exactly like a Kubernetes Pod.
+#
+# Prereqs on the host (Docker Desktop VM / Linux): the `ppp` kernel module must be
+# loadable and `/dev/ppp` must exist. This is the highest-risk item — verify first.
+#
+# Usage:
+#   cp .env.example .env        # fill in VPN_* and ORACLE_*
+#   docker compose up --build
+# Success = the worker logs "✓ Test query (SELECT 1 FROM DUAL): 1" and exits 0.
+
+services:
+  vpn-sidecar:
+    build: ./vpn-sidecar
+    image: presa/vpn-sidecar:dev
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/ppp
+    # If /dev/ppp can't be mapped on your host, swap the two lines above for:
+    #   privileged: true
+    environment:
+      VPN_GATEWAY: ${VPN_GATEWAY}
+      VPN_USERNAME: ${VPN_USERNAME}
+      VPN_PASSWORD: ${VPN_PASSWORD}
+      VPN_TRUSTED_CERT: ${VPN_TRUSTED_CERT:-}
+      SSH_JUMP: ${SSH_JUMP:-}
+      SSH_FORWARDS: ${SSH_FORWARDS:-}
+    volumes:
+      - shared:/shared
+      # mount an SSH key here if you use no_route SSH tunnels:
+      # - ./secrets/jump_key:/keys/jump_key:ro
+
+  worker:
+    build: ./worker
+    image: presa/worker:dev
+    # share the sidecar's network namespace = same Pod, locally
+    network_mode: "service:vpn-sidecar"
+    depends_on:
+      vpn-sidecar:
+        condition: service_healthy
+    environment:
+      WAIT_FOR_VPN: "true"
+      READY_FILE: /shared/vpn-ready
+      SCRIPT_PATH: /scripts/test_oracle_connection.py
+      ORACLE_HOST: ${ORACLE_HOST}
+      ORACLE_PORT: ${ORACLE_PORT:-1521}
+      ORACLE_SERVICE: ${ORACLE_SERVICE:-}
+      ORACLE_SID: ${ORACLE_SID:-}
+      ORACLE_USER: ${ORACLE_USER}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
+    volumes:
+      - shared:/shared
+      - ./scripts:/scripts:ro
+
+volumes:
+  shared:

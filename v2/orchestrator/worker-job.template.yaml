@@ -1,0 +1,63 @@
+# Worker Job template — stamped per tenant by the orchestrator.
+# The orchestrator sets per-tenant: metadata.name, labels.tenant, the worker's
+# `--tenant` arg, and the vpn-sidecar's per-tenant VPN Secret name.
+# ${VAR} placeholders are filled from the orchestrator's env at render time.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: PLACEHOLDER # set by the orchestrator
+  labels:
+    app: presa-etl
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600 # auto-clean finished Jobs after 1h
+  template:
+    metadata:
+      labels:
+        app: presa-etl
+    spec:
+      serviceAccountName: worker # shared worker SA → Pod Identity (Secrets Manager + S3)
+      restartPolicy: Never
+      tolerations:
+        - key: workload
+          value: etl
+          effect: NoSchedule # land on the dedicated ETL Karpenter nodes
+      volumes:
+        - name: shared
+          emptyDir: {}
+      # Native sidecar (k8s >= 1.29): an initContainer with restartPolicy:Always
+      # starts first and keeps running alongside the worker.
+      initContainers:
+        - name: vpn-sidecar
+          image: ${IMAGE_VPN_SIDECAR}
+          restartPolicy: Always
+          securityContext:
+            privileged: true # openfortivpn needs /dev/ppp + NET_ADMIN
+          env:
+            - name: TENANT_ID
+              value: PLACEHOLDER # set by the orchestrator; sidecar self-fetches presa/etl/<id>
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      containers:
+        - name: worker
+          image: ${IMAGE_WORKER}
+          args: ["--tenant", "PLACEHOLDER"] # set by the orchestrator
+          env:
+            - name: TENANTS_S3
+              value: ${TENANTS_S3}
+            - name: SCRIPTS_S3_PREFIX
+              value: ${SCRIPTS_S3_PREFIX}
+            - name: AWS_REGION
+              value: ${AWS_REGION}
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

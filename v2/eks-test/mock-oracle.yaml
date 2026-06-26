@@ -1,0 +1,45 @@
+# In-cluster mock Oracle for the no-VPN EKS validation. Throwaway — delete after.
+# Reachable at oracle-mock.etl.svc.cluster.local:1521, service FREEPDB1, user presa/presa.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oracle-mock
+  namespace: etl
+  labels: { app: oracle-mock }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: oracle-mock }
+  template:
+    metadata:
+      labels: { app: oracle-mock }
+    spec:
+      containers:
+        - name: oracle
+          image: gvenzl/oracle-free:slim
+          env:
+            - { name: ORACLE_PASSWORD, value: test }
+            - { name: APP_USER, value: presa }
+            - { name: APP_USER_PASSWORD, value: presa }
+          ports:
+            - containerPort: 1521
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh"]
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits: { memory: 4Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle-mock
+  namespace: etl
+spec:
+  selector: { app: oracle-mock }
+  ports:
+    - port: 1521
+      targetPort: 1521

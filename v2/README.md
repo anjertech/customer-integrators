@@ -10,52 +10,57 @@ integrators, `pods/`, and `applications/`.
 ```
 CronJob (schedule)
   └─► Orchestrator Job  (Python)            reads tenants.json from S3
-        └─► Worker Job   (one per ENABLED tenant)
-              Pod = [ vpn-sidecar ] + [ worker ]   (two containers, shared netns)
-                vpn-sidecar: openfortivpn → client network → SSH jump → local port-forward
-                worker:      pulls the tenant script from S3 + Oracle creds from
-                             Secrets Manager, runs the script against the forwarded port
+        └─► Worker Job   (one per ENABLED tenant, stamped with --tenant <id>)
+              Pod = [ vpn-sidecar ] + [ worker ]   (native sidecar + main container)
+                vpn-sidecar: self-fetches its VPN secret → openfortivpn → client network
+                worker:      self-fetches its Oracle creds + script (from --tenant id),
+                             runs the script against the client's Oracle DB
 ```
 
 ## Components
 | Dir | What | Image |
 |---|---|---|
-| `orchestrator/` | Python dispatcher — reads the tenant list, creates one worker Job per tenant via the Kubernetes API | ECR `orchestrator` |
-| `worker/` | Script-agnostic Python runner — Oracle thick-mode client baked in; runs the per-tenant script | ECR `worker` |
-| `vpn-sidecar/` | `openfortivpn` + SSH tunnel; isolates the privileged `NET_ADMIN`/tun networking from the worker | part of the worker pod |
-| `scripts/` | Per-tenant ETL scripts + the `select-1` smoke test (the live source of truth lives in S3) | — |
-| `k8s/` | CronJob, RBAC, namespace, worker Job template | — |
+| `orchestrator/` | Python dispatcher — reads the tenant list, creates one worker Job per tenant via the Kubernetes API (holds `worker-job.template.yaml`) | ECR `orchestrator` |
+| `worker/` | Script-agnostic Python runner — Oracle thick-mode client baked in; self-fetches its secret + script and runs it | ECR `worker` |
+| `vpn-sidecar/` | `openfortivpn` (+ optional SSH tunnels); isolates the privileged `NET_ADMIN`/`/dev/ppp` networking; self-fetches its VPN secret via awscli | ECR `vpn-sidecar` |
+| `scripts/` | Per-tenant ETL scripts + `test_oracle_connection.py` (smoke test). Live scripts are uploaded to S3. | — |
+| `chart/` | Helm chart — namespace + ServiceAccounts + RBAC + the orchestrator CronJob | — |
+| `eks-test/` | No-VPN EKS validation: in-cluster mock Oracle + runbook to prove the pipeline without client creds | — |
+| `docker-compose.yml` | Local full-chain test (sidecar + worker as one "pod") | — |
 
 ## How it maps to the v2 infra
 - **Namespace `etl`** + ServiceAccounts `orchestrator` / `worker` — already wired to
   **Pod Identity** roles (orchestrator → S3 read; worker → Secrets Manager + S3).
 - **Karpenter ETL NodePool** — worker pods tolerate `workload=etl:NoSchedule`, so they
   land on the dedicated On-Demand ETL nodes, off the API/dashboard nodes.
-- **ECR** repos `orchestrator` and `worker` hold the images.
+- **ECR** repos `orchestrator`, `worker`, and `vpn-sidecar` hold the images.
 - **Egress** leaves via the NAT gateway's Elastic IP — the address clients allow-list.
-- Tenant **secrets** live in AWS Secrets Manager under `presa/etl/<tenant>` (the worker
-  role is scoped to `presa/*`).
+- Tenant **secrets** live in AWS Secrets Manager under `presa/etl/<tenant>`; both the
+  sidecar and worker **self-fetch** theirs via Pod Identity (the `worker` role is
+  scoped to `presa/*`) — no External Secrets.
 - The tenant **list** (`tenants.json`) and **scripts** live in S3.
 
-## Tenant model (finalized later, at the orchestrator phase)
+## Tenant model
 A tenant is a **client** that owns **many dealerships**, each with its **own Oracle
 database** — a private IP on the client's network, reached over **one VPN** (a few are
-`no_route` and need a dedicated SSH tunnel). So: **one tenant → one VPN → many DBs**,
-which is how the existing `fetch_and_send_*` scripts already work (a dict of ~20
-dealership hosts they iterate over).
+`no_route` and need a dedicated SSH tunnel). So: **one worker pod per client → one VPN
+→ many DBs**, and the tenant's *script* iterates over those DBs.
 
-The exact `tenants.json` schema + Secrets Manager layout are **deferred** until we build
-the orchestrator — they don't affect the connectivity half (vpn-sidecar + worker), which
-is **script-agnostic**. `tenants.example.json` is a placeholder, not the final shape.
-Tentative boundary (not locked): **one worker pod per client**, iterating its DBs.
+`tenants.json` (in S3) is the source of truth. Each entry is `{ id, enabled, script }`
+(see `tenants.example.json`). From a tenant's `id`, the worker derives:
+- its **secret** by convention → `presa/etl/<id>` (Secrets Manager), and
+- its **script** by looking up the entry's `script` field → fetched from S3.
 
-## Build order (connectivity-first — real FortiGate dial is the riskiest part)
+So **onboarding a tenant is pure data**: create the `presa/etl/<id>` secret, upload its
+script to S3, add a line to `tenants.json` — no redeploy, no new Kubernetes objects.
+
+## Status (connectivity-first — the real FortiGate dial is the last risk)
 - [x] **Connectivity half (code)** — `vpn-sidecar/` + `worker/` + `scripts/test_oracle_connection.py` + `docker-compose.yml`
-- [x] **Prove `SELECT 1 FROM DUAL`** — worker half proven locally (Stage 1); VPN (Stages 2–3) assumed
-- [x] **orchestrator (code)** — `orchestrator/` dispatcher + `worker-job.template.yaml`; worker accepts `--tenant`
-- [x] **k8s deploy wiring (Helm)** — `chart/`: namespace (PSS privileged) + SAs + RBAC + CronJob (self-fetch, no External Secrets)
-- [ ] **Deploy + prove on EKS** — add `vpn-sidecar` ECR repo, build/push images, `helm install`, run → `SELECT 1` on a real node
-- [ ] **first real per-tenant script**
+- [x] **Worker proven locally** — `SELECT 1 FROM DUAL` against a mock Oracle (Stage 1)
+- [x] **orchestrator + Helm chart** — `--tenant` dispatch, `chart/` (namespace/SAs/RBAC/CronJob), self-fetch (no External Secrets)
+- [x] **Proven on EKS (no-VPN)** — orchestrator → per-tenant worker Jobs → mock Oracle → `SELECT 1`, fanned out over 3 tenants. See `eks-test/`.
+- [ ] **Prove the real `openfortivpn` dial** — needs client FortiGate creds + `/dev/ppp` on the EKS node (the one unproven piece)
+- [ ] **First real per-tenant script** (replace the `hello_*` / `test_oracle_connection` stubs)
 
 ### Local run
 ```bash

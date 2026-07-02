@@ -16,13 +16,19 @@ ENV ORACLE_CLIENT_DIR=/opt/oracle/instantclient \
     PYTHONUNBUFFERED=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libaio1 unzip curl ca-certificates \
+ && apt-get install -y --no-install-recommends libaio1 unzip curl ca-certificates gnupg \
+ && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+    | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
+ && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+    > /etc/apt/sources.list.d/microsoft-prod.list \
+ && apt-get update \
+ && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 unixodbc \
  && mkdir -p /opt/oracle \
  && curl -fsSL "$ORACLE_IC_URL" -o /tmp/ic.zip \
  && unzip -q /tmp/ic.zip -d /opt/oracle \
  && mv /opt/oracle/instantclient_* "$ORACLE_CLIENT_DIR" \
  && rm /tmp/ic.zip \
- && apt-get purge -y unzip curl && apt-get autoremove -y \
+ && apt-get purge -y unzip curl gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

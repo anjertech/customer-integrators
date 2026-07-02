@@ -29,6 +29,7 @@ import sys
 import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+from urllib.parse import quote
 
 from gmuni_mappings import (
     get_organization_from_row,
@@ -227,6 +228,72 @@ class ProgressTracker:
 # Global progress tracker (initialized per DB)
 progress_tracker: Optional[ProgressTracker] = None
 
+
+def scoped_customer_key(customer_id: Any, organization: Any) -> str:
+    """Build the sender-side customer key used for GMUNI org-scoped customers."""
+    customer_id = safe_string(customer_id)
+    organization = safe_string(organization) or "none"
+    if not customer_id:
+        return ""
+    return f"{customer_id}~{organization}"
+
+
+def customer_payload_key(customer: Dict[str, Any]) -> str:
+    """Build the sender-side key for a parsed customer payload."""
+    return scoped_customer_key(customer.get("id"), customer.get("organization"))
+
+
+def order_customer_payload_key(order: Dict[str, Any]) -> str:
+    """Build the sender-side customer key required by a parsed order payload."""
+    return scoped_customer_key(order.get("customer_id"), order.get("organization"))
+
+
+def progress_entity_id(endpoint: str, item: Dict[str, Any]) -> Optional[str]:
+    """
+    Progress files must distinguish GMUNI customers with the same id in different
+    organizations. Other endpoints keep the legacy id-only progress key.
+    """
+    if endpoint == "customers":
+        return customer_payload_key(item) or None
+    return item.get("id")
+
+
+def backend_lookup_endpoint(endpoint: str) -> Optional[str]:
+    if endpoint in {"customers", "orders"}:
+        return endpoint
+    return None
+
+
+async def _backend_item_exists(
+    session: aiohttp.ClientSession,
+    endpoint: str,
+    item: Dict[str, Any],
+) -> Dict[str, Any]:
+    lookup_endpoint = backend_lookup_endpoint(endpoint)
+    item_id = safe_string(item.get("id"))
+    if not lookup_endpoint or not item_id:
+        return {"checked": False, "exists": None, "status": None, "response_data": None}
+
+    params = {}
+    organization = safe_string(item.get("organization"))
+    if organization:
+        params["organization"] = organization
+
+    url = f"{API_BASE}/{lookup_endpoint}/{quote(item_id, safe='')}"
+    try:
+        async with session.get(url, headers=token_manager.get_headers(), params=params) as response:
+            try:
+                response_data = await response.json(content_type=None)
+            except Exception:
+                response_data = await response.text()
+            if response.status == 200:
+                return {"checked": True, "exists": True, "status": response.status, "response_data": response_data}
+            if response.status == 404:
+                return {"checked": True, "exists": False, "status": response.status, "response_data": response_data}
+            return {"checked": True, "exists": None, "status": response.status, "response_data": response_data}
+    except Exception as exc:
+        return {"checked": True, "exists": None, "status": None, "response_data": str(exc)}
+
 # =============================================================================
 # SQL QUERY
 # =============================================================================
@@ -276,7 +343,7 @@ FROM autos.VT_VFACTURAS_PLD_CARONE
 
 def default_from_date_ymd() -> str:
     today = datetime.now()
-    year = today.year if today.month >= 5 else today.year - 1
+    year = today.year - 1
     return f"{year}-05-01"
 
 
@@ -864,11 +931,43 @@ async def _send_single_item(
 ) -> Dict[str, Any]:
     """Send one item with progress tracking and consistent logging."""
     item_id = item.get("id")
+    progress_id = progress_entity_id(endpoint, item)
     item_label = label or f"Item {item_num}"
+
+    if not force_send and backend_lookup_endpoint(endpoint) is not None:
+        lookup = await _backend_item_exists(session, endpoint, item)
+        if lookup["exists"] is True:
+            print(f"  [{endpoint}] {item_label} (id={item_id}): SKIPPED (exists in backend)")
+            return {
+                "ok": True,
+                "skipped": True,
+                "status": lookup["status"],
+                "response_data": lookup["response_data"],
+                "item_id": item_id,
+            }
+        if lookup["exists"] is None:
+            print(
+                f"  [{endpoint}] {item_label} (id={item_id}): "
+                f"GET check failed ({lookup['status']}) - {lookup['response_data']}"
+            )
+            return {
+                "ok": False,
+                "skipped": False,
+                "status": lookup["status"],
+                "response_data": lookup["response_data"],
+                "item_id": item_id,
+            }
     
     # Skip if already sent (from progress file), unless this is a forced recovery send
-    if not force_send and progress_tracker and item_id and progress_tracker.is_sent(endpoint, item_id):
-        print(f"  [{endpoint}] {item_label} (id={item_id}): SKIPPED (already sent)")
+    if (
+        not force_send
+        and backend_lookup_endpoint(endpoint) is None
+        and progress_tracker
+        and progress_id
+        and progress_tracker.is_sent(endpoint, progress_id)
+    ):
+        scoped_note = f", progress_id={progress_id}" if progress_id != item_id else ""
+        print(f"  [{endpoint}] {item_label} (id={item_id}{scoped_note}): SKIPPED (already sent)")
         return {
             "ok": True,
             "skipped": True,
@@ -894,8 +993,8 @@ async def _send_single_item(
     print(f"  [{endpoint}] {item_label} (id={item_id}): {status} - {response_data}")
     
     ok = status is not None and 200 <= status < 300
-    if ok and progress_tracker and item_id:
-        progress_tracker.mark_sent(endpoint, item_id)
+    if ok and progress_tracker and progress_id:
+        progress_tracker.mark_sent(endpoint, progress_id)
     
     return {
         "ok": ok,
@@ -912,7 +1011,7 @@ async def _recover_order_dependencies_and_retry(
     item_num: int,
     missing_customer: bool,
     missing_vehicle: bool,
-    customers_by_id: Dict[str, Dict[str, Any]],
+    customers_by_key: Dict[str, Dict[str, Any]],
     vehicles_by_id: Dict[str, Dict[str, Any]],
     verbose: bool = False,
 ) -> bool:
@@ -929,7 +1028,8 @@ async def _recover_order_dependencies_and_retry(
     dependencies_ok = True
     
     if missing_customer:
-        customer_payload = customers_by_id.get(customer_id)
+        customer_key = order_customer_payload_key(order)
+        customer_payload = customers_by_key.get(customer_key)
         if customer_payload:
             recovery_customer_payload = _prepare_recovery_customer_payload(customer_payload, order)
             original_organization = safe_string(customer_payload.get("organization"))
@@ -954,7 +1054,8 @@ async def _recover_order_dependencies_and_retry(
         else:
             print(
                 f"  [orders] Recovery skipped: customer payload not found for "
-                f"order id={order_id}, customer_id={customer_id}"
+                f"order id={order_id}, customer_id={customer_id}, "
+                f"organization={order.get('organization')}"
             )
             dependencies_ok = False
     
@@ -1028,7 +1129,7 @@ async def send_batch(
     batch_num: int,
     total_batches: int,
     verbose: bool = False,
-    customers_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
+    customers_by_key: Optional[Dict[str, Dict[str, Any]]] = None,
     vehicles_by_id: Optional[Dict[str, Dict[str, Any]]] = None,
 ):
     """Send a batch of items to an endpoint."""
@@ -1054,7 +1155,7 @@ async def send_batch(
             continue
         
         recovered = False
-        if endpoint == "orders" and customers_by_id is not None and vehicles_by_id is not None:
+        if endpoint == "orders" and customers_by_key is not None and vehicles_by_id is not None:
             dependency_state = _detect_missing_order_dependencies(
                 status=send_result.get("status"),
                 response_data=send_result.get("response_data"),
@@ -1066,7 +1167,7 @@ async def send_batch(
                     item_num=idx,
                     missing_customer=dependency_state["customer"],
                     missing_vehicle=dependency_state["vehicle"],
-                    customers_by_id=customers_by_id,
+                    customers_by_key=customers_by_key,
                     vehicles_by_id=vehicles_by_id,
                     verbose=verbose,
                 )
@@ -1116,7 +1217,7 @@ async def send_to_api(vehicles: List[Dict], customers: List[Dict], orders: List[
         "orders": {"sent": 0, "skipped": 0, "errors": 0, "recovered": 0},
     }
     
-    customers_by_id = {c["id"]: c for c in customers if c.get("id")}
+    customers_by_key = {customer_payload_key(c): c for c in customers if customer_payload_key(c)}
     vehicles_by_id = {v["id"]: v for v in vehicles if v.get("id")}
     
     async with aiohttp.ClientSession() as session:
@@ -1213,7 +1314,7 @@ async def send_to_api(vehicles: List[Dict], customers: List[Dict], orders: List[
                 batch_num=batch_num,
                 total_batches=total_batches,
                 verbose=verbose,
-                customers_by_id=customers_by_id,
+                customers_by_key=customers_by_key,
                 vehicles_by_id=vehicles_by_id,
             )
             for key, value in batch_stats.items():
@@ -1285,7 +1386,8 @@ def main():
     print(f"TOTAL ROWS FETCHED: {len(all_rows)}")
     print("=" * 60)
     
-    # Parse entities (deduplicated by ID)
+    # Parse entities. GMUNI customer ids can be recycled across sub-orgs, so
+    # customers are deduplicated by id+organization, not by id alone.
     vehicles_map: Dict[str, Dict[str, Any]] = {}
     customers_map: Dict[str, Dict[str, Any]] = {}
     orders_map: Dict[str, Dict[str, Any]] = {}
@@ -1298,7 +1400,9 @@ def main():
         if vehicle and vehicle.get('id'):
             vehicles_map[vehicle['id']] = vehicle
         if customer and customer.get('id'):
-            customers_map[customer['id']] = customer
+            scoped_key = customer_payload_key(customer)
+            if scoped_key:
+                customers_map[scoped_key] = customer
         if order and order.get('id'):
             orders_map[order['id']] = order
     
@@ -1316,9 +1420,9 @@ def main():
         # Limit orders and only include their associated vehicles/customers
         orders = orders[:args.limit]
         order_vehicle_ids = {o['vehicle_id'] for o in orders}
-        order_customer_ids = {o['customer_id'] for o in orders}
+        order_customer_keys = {order_customer_payload_key(o) for o in orders}
         vehicles = [v for v in vehicles if v['id'] in order_vehicle_ids]
-        customers = [c for c in customers if c['id'] in order_customer_ids]
+        customers = [c for c in customers if customer_payload_key(c) in order_customer_keys]
         print(f"\nAfter --limit {args.limit}:")
         print(f"  Vehicles: {len(vehicles)}")
         print(f"  Customers: {len(customers)}")

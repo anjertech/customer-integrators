@@ -16,11 +16,11 @@ Identity), so there are no ExternalSecret resources here.
 ## Prerequisites
 1. The **v2 EKS infra** applied (cluster + Pod Identity roles for `etl/orchestrator`
    and `etl/worker`).
-2. **ECR repos** for `orchestrator`, `worker`, **and `vpn-sidecar`**. The infra
-   currently creates `orchestrator` + `worker` — **add `vpn-sidecar`** to
-   `repository_names` in `infrastructure/v2/environments/dev/main.tf`.
+2. **ECR repos** for `orchestrator`, `worker`, and `vpn-sidecar`. The current
+   `infrastructure/v2` dev root creates all three.
 3. Images **built + pushed** to those repos (tags wired via values).
-4. `tenants.json` uploaded to the `tenantsS3` location; scripts under `scriptsS3Prefix`.
+4. `tenants.json` uploaded to the `tenantsS3` location; script bundles copied from
+   the current `../core` scripts under `scriptsS3Prefix`.
 
 ## Install
 Create + label the namespace first (Helm stores the release in it, and the sidecar
@@ -42,6 +42,7 @@ release into a *different*, existing namespace and let the chart create `etl`.)
 | `schedule` | `0 6 * * *` | CronJob schedule (UTC) |
 | `tenantsS3` | `s3://presa-etl/tenants.json` | tenant list |
 | `scriptsS3Prefix` | `s3://presa-etl/scripts` | script prefix |
+| `progressS3Prefix` | empty | optional fallback prefix for legacy per-tenant `progress*.json` sync |
 | `region` | `us-east-2` | AWS region |
 | `image.*` | dev ECR | registry + per-image repo/tag |
 

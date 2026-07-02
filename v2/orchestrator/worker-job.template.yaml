@@ -50,6 +50,8 @@ spec:
               value: ${TENANTS_S3}
             - name: SCRIPTS_S3_PREFIX
               value: ${SCRIPTS_S3_PREFIX}
+            - name: PROGRESS_S3_PREFIX
+              value: ${PROGRESS_S3_PREFIX}
             - name: AWS_REGION
               value: ${AWS_REGION}
           volumeMounts:

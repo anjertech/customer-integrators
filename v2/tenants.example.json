@@ -3,12 +3,44 @@
     {
       "id": "P_COMON_MG_MG",
       "enabled": true,
-      "script": "gmuni/orders.py"
+      "script": "gmuni/fetch_and_send_gmuni.py",
+      "files": [
+        "gmuni/fetch_and_send_gmuni.py",
+        "gmuni/gmuni_mappings.py"
+      ],
+      "args": [
+        "--password",
+        "${ORACLE_PASSWORD}",
+        "--db",
+        "P_COMON_MG_MG",
+        "--batch-size",
+        "5"
+      ]
     },
     {
-      "id": "P_CUALE_KIA_LAREDO",
+      "id": "universidad-orders",
       "enabled": false,
-      "script": "universidad/orders.py"
+      "script": "universidad/fetch_and_send_universidad.py",
+      "files": [
+        "universidad/fetch_and_send_universidad.py",
+        "universidad/universidad_common.py"
+      ],
+      "env": {
+        "UNIVERSIDAD_ODBC_CONNECTION_STRING": "${UNIVERSIDAD_ODBC_CONNECTION_STRING}",
+        "PRESA_TENANT_ID": "${PRESA_TENANT_ID}",
+        "PRESA_CLIENT_ID": "${PRESA_CLIENT_ID}",
+        "PRESA_CLIENT_SECRET": "${PRESA_CLIENT_SECRET}"
+      },
+      "args": [
+        "--table",
+        "dbo.K_40810_PLD",
+        "--organization-mode",
+        "sucursal",
+        "--batch-size",
+        "10",
+        "--db-key",
+        "mxa_full_sucursal"
+      ]
     }
   ]
 }

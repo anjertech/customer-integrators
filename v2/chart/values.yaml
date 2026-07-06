@@ -30,6 +30,9 @@ vpn:
 region: us-east-2
 tenantsS3: s3://presa-etl/tenants.json
 scriptsS3Prefix: s3://presa-etl/scripts
+# Optional fallback for legacy scripts that still rely on progress*.json.
+# Prefer backend idempotency through GET /orders/{id}?organization=... etc.
+progressS3Prefix: ""
 
 # Must match the names the EKS Pod Identity associations were created with.
 serviceAccounts:

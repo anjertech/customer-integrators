@@ -1056,6 +1056,49 @@ def progress_item_id(endpoint: str, item: Dict[str, Any]) -> str:
     return item_id
 
 
+def backend_lookup_endpoint(endpoint: str) -> Optional[str]:
+    if endpoint in {"customers", "orders", "payments"}:
+        return endpoint
+    return None
+
+
+async def backend_item_exists(
+    session: aiohttp.ClientSession,
+    api_base: str,
+    endpoint: str,
+    item: Dict[str, Any],
+    token_manager: TokenManager,
+) -> Tuple[Optional[bool], Optional[int], Any]:
+    lookup_endpoint = backend_lookup_endpoint(endpoint)
+    if lookup_endpoint is None:
+        return None, None, None
+
+    item_id = clean(item.get("id"))
+    if not item_id:
+        return None, None, None
+
+    params: Dict[str, str] = {}
+    organization = clean(item.get("organization"))
+    if organization:
+        params["organization"] = organization
+
+    url = f"{api_base.rstrip('/')}/{lookup_endpoint}/{quote(item_id, safe='')}"
+    try:
+        async with session.get(url, headers=token_manager.headers(), params=params) as response:
+            text = await response.text()
+            try:
+                response_data = json.loads(text)
+            except Exception:
+                response_data = text
+            if response.status == 200:
+                return True, response.status, response_data
+            if response.status == 404:
+                return False, response.status, response_data
+            return None, response.status, response_data
+    except Exception as exc:
+        return None, None, str(exc)
+
+
 async def post_payload(
     session: aiohttp.ClientSession,
     api_base: str,
@@ -1112,7 +1155,25 @@ async def send_entity_batches(
                 print(f"Sending batch {batch_num}/{total_batches} to {endpoint} ({len(batch)} item(s))")
                 for idx, item in enumerate(batch, start=1):
                     item_id = progress_item_id(endpoint, item)
-                    if item_id != "<missing-id>" and progress.contains(endpoint, item_id):
+                    exists, lookup_status, lookup_data = await backend_item_exists(
+                        session, api_base, endpoint, item, token_manager
+                    )
+                    if exists is True:
+                        print(f"  [{endpoint}] Item {idx} (id={item_id}): SKIPPED (exists in backend)")
+                        totals[endpoint]["skipped"] += 1
+                        continue
+                    if exists is None and backend_lookup_endpoint(endpoint) is not None:
+                        print(
+                            f"  [{endpoint}] Item {idx} (id={item_id}): "
+                            f"GET check failed ({lookup_status}) - {lookup_data}"
+                        )
+                        totals[endpoint]["errors"] += 1
+                        continue
+                    if (
+                        backend_lookup_endpoint(endpoint) is None
+                        and item_id != "<missing-id>"
+                        and progress.contains(endpoint, item_id)
+                    ):
                         print(f"  [{endpoint}] Item {idx} (id={item_id}): SKIPPED")
                         totals[endpoint]["skipped"] += 1
                         continue
@@ -1151,9 +1212,19 @@ async def send_payment_batches(
             print(f"Sending batch {batch_num}/{total_batches} to payments ({len(batch)} item(s))")
             for idx, payment in enumerate(batch, start=1):
                 payment_id = clean(payment.get("id")) or "<missing-id>"
-                if payment_id != "<missing-id>" and progress.contains("payments", payment_id):
-                    print(f"  [payments] Item {idx} (id={payment_id}): SKIPPED")
+                exists, lookup_status, lookup_data = await backend_item_exists(
+                    session, api_base, "payments", payment, token_manager
+                )
+                if exists is True:
+                    print(f"  [payments] Item {idx} (id={payment_id}): SKIPPED (exists in backend)")
                     totals["skipped"] += 1
+                    continue
+                if exists is None:
+                    print(
+                        f"  [payments] Item {idx} (id={payment_id}): "
+                        f"GET check failed ({lookup_status}) - {lookup_data}"
+                    )
+                    totals["errors"] += 1
                     continue
 
                 current_order_id = clean(payment.get("order_id"))

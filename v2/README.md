@@ -47,9 +47,14 @@ database** — a private IP on the client's network, reached over **one VPN** (a
 → many DBs**, and the tenant's *script* iterates over those DBs.
 
 `tenants.json` (in S3) is the source of truth. Each entry is `{ id, enabled, script }`
-(see `tenants.example.json`). From a tenant's `id`, the worker derives:
+plus optional `files`, `args`, `env`, and `secret` fields (see
+`tenants.example.json`). From a tenant's `id`, the worker derives:
 - its **secret** by convention → `presa/etl/<id>` (Secrets Manager), and
-- its **script** by looking up the entry's `script` field → fetched from S3.
+- its **script bundle** by looking up `script`/`files` → fetched from S3.
+
+`args` and `env` support `${ENV_VAR}` placeholders expanded after the tenant secret
+is loaded, so scripts that still require flags like `--password`, `--table`, or
+`--db-key` can be run without baking tenant-specific values into the image.
 
 So **onboarding a tenant is pure data**: create the `presa/etl/<id>` secret, upload its
 script to S3, add a line to `tenants.json` — no redeploy, no new Kubernetes objects.
@@ -60,7 +65,8 @@ script to S3, add a line to `tenants.json` — no redeploy, no new Kubernetes ob
 - [x] **orchestrator + Helm chart** — `--tenant` dispatch, `chart/` (namespace/SAs/RBAC/CronJob), self-fetch (no External Secrets)
 - [x] **Proven on EKS (no-VPN)** — orchestrator → per-tenant worker Jobs → mock Oracle → `SELECT 1`, fanned out over 3 tenants. See `eks-test/`.
 - [ ] **Prove the real `openfortivpn` dial** — needs client FortiGate creds + `/dev/ppp` on the EKS node (the one unproven piece)
-- [ ] **First real per-tenant script** (replace the `hello_*` / `test_oracle_connection` stubs)
+- [ ] **First real per-tenant script** (upload the current `fetch_and_send*` script
+      bundle from `../core` and wire the tenant args/env)
 
 ### Local run
 ```bash

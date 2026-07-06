@@ -29,6 +29,7 @@ import sys
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import quote
 
 import aiohttp
 import oracledb
@@ -190,6 +191,36 @@ class PaymentProgressTracker:
         if payment_id not in self.data["payments"]:
             self.data["payments"].append(payment_id)
             self._save()
+
+
+async def backend_payment_exists(
+    session: aiohttp.ClientSession,
+    payment: Dict[str, Any],
+    token_manager: TokenManager,
+) -> Tuple[Optional[bool], Optional[int], Any]:
+    payment_id = str(payment.get("id") or "").strip()
+    if not payment_id:
+        return None, None, "missing payment id"
+
+    params = {}
+    organization = str(payment.get("organization") or "").strip()
+    if organization:
+        params["organization"] = organization
+
+    url = f"{API_BASE}/payments/{quote(payment_id, safe='')}"
+    try:
+        async with session.get(url, headers=token_manager.get_headers(), params=params) as response:
+            try:
+                response_data = await response.json(content_type=None)
+            except Exception:
+                response_data = await response.text()
+            if response.status == 200:
+                return True, response.status, response_data
+            if response.status == 404:
+                return False, response.status, response_data
+            return None, response.status, response_data
+    except Exception as exc:
+        return None, None, str(exc)
 
 
 # =============================================================================
@@ -775,11 +806,21 @@ async def send_batch(
     for idx, payment in enumerate(payments, start=1):
         payment_id = payment.get("id", "<missing-id>")
 
-        if progress_tracker.is_sent(payment_id):
+        exists, lookup_status, lookup_data = await backend_payment_exists(
+            session, payment, token_manager
+        )
+        if exists is True:
             print(
-                f"  [payments] Item {idx} (id={payment_id}): SKIPPED (already sent)"
+                f"  [payments] Item {idx} (id={payment_id}): SKIPPED (exists in backend)"
             )
             stats["skipped"] += 1
+            continue
+        if exists is None:
+            print(
+                f"  [payments] Item {idx} (id={payment_id}): "
+                f"GET check failed ({lookup_status}) - {lookup_data}"
+            )
+            stats["errors"] += 1
             continue
 
         headers = token_manager.get_headers()

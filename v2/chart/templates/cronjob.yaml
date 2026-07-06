@@ -30,6 +30,8 @@ spec:
                   value: {{ .Values.tenantsS3 | quote }}
                 - name: SCRIPTS_S3_PREFIX
                   value: {{ .Values.scriptsS3Prefix | quote }}
+                - name: PROGRESS_S3_PREFIX
+                  value: {{ .Values.progressS3Prefix | quote }}
                 - name: AWS_REGION
                   value: {{ .Values.region | quote }}
                 - name: VPN_ENABLED

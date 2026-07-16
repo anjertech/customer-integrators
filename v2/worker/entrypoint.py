@@ -35,7 +35,9 @@ def log(msg: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--tenant", help="tenant id; derive script + secret from it (production mode)")
+    p.add_argument(
+        "--tenant", help="tenant id; derive script + secret from it (production mode)"
+    )
     return p.parse_args()
 
 
@@ -70,7 +72,9 @@ def _s3_join(prefix: str, key: str) -> str:
     if key.startswith("s3://"):
         return key
     if not prefix:
-        log("✗ tenant script entries require SCRIPTS_S3_PREFIX unless they are full s3:// URIs")
+        log(
+            "✗ tenant script entries require SCRIPTS_S3_PREFIX unless they are full s3:// URIs"
+        )
         sys.exit(2)
     return f"{prefix.rstrip('/')}/{key.lstrip('/')}"
 
@@ -263,7 +267,11 @@ def main() -> None:
 
     if entry:
         env.update(tenant_env(entry, env))
-    script_args = tenant_args(entry, env) if entry else []
+        script_args = tenant_args(entry, env)
+    else:
+        # local test mode: args come from SCRIPT_ARGS (shell-style string), e.g.
+        # SCRIPT_ARGS="--db P_CUALE_KIA_LINDAVISTA" or SCRIPT_ARGS="--all"
+        script_args = shlex.split(os.environ.get("SCRIPT_ARGS", ""))
 
     script_dir = str(pathlib.Path(script_path).parent)
     env["PYTHONPATH"] = os.pathsep.join(
@@ -271,7 +279,9 @@ def main() -> None:
     )
     progress_s3 = progress_prefix(entry, args.tenant)
     if args.tenant and not progress_s3:
-        log("WARNING: PROGRESS_S3_PREFIX is not set; progress*.json will be pod-local and ephemeral")
+        log(
+            "WARNING: PROGRESS_S3_PREFIX is not set; progress*.json will be pod-local and ephemeral"
+        )
     sync_progress_from_s3(progress_s3, script_dir)
 
     # 4. run the script; its exit code becomes ours
@@ -279,7 +289,9 @@ def main() -> None:
         log(f"running {script_path} args={redact_args(script_args)}")
     else:
         log(f"running {script_path}")
-    result = subprocess.run([sys.executable, script_path, *script_args], env=env, cwd=script_dir)
+    result = subprocess.run(
+        [sys.executable, script_path, *script_args], env=env, cwd=script_dir
+    )
     upload_progress_to_s3(progress_s3, script_dir)
     log(f"script exited with code {result.returncode}")
     sys.exit(result.returncode)

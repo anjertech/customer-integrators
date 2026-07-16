@@ -18,6 +18,7 @@ RUN apt-get update \
       openfortivpn \
       ppp \
       openssh-client \
+      sshpass \
       iproute2 \
       iputils-ping \
       ca-certificates \

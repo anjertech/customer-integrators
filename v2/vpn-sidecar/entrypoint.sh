@@ -23,6 +23,8 @@ if [ -z "${VPN_GATEWAY:-}" ] && [ -n "${SECRET_NAME:-}" ]; then
   export VPN_TRUSTED_CERT="$(jq -r '.vpn.trusted_cert // empty' <<<"$secret_json")"
   export SSH_JUMP="$(jq -r '.ssh.jump // empty' <<<"$secret_json")"
   export SSH_FORWARDS="$(jq -r '.ssh.forwards // empty' <<<"$secret_json")"
+  export SSH_PASSWORD="$(jq -r '.ssh.password // empty' <<<"$secret_json")"
+  export SSH_PORT="$(jq -r '.ssh.port // empty' <<<"$secret_json")"
   ssh_key="$(jq -r '.ssh.private_key // empty' <<<"$secret_json")"
   if [ -n "$ssh_key" ]; then
     printf '%s\n' "$ssh_key" >/tmp/ssh_key
@@ -34,12 +36,18 @@ fi
 # ---- config (from env, or just-fetched above) --------------------------------
 : "${VPN_GATEWAY:?required: host[:port] of the FortiGate, e.g. vpn.client.com:443}"
 : "${VPN_USERNAME:?required}"
-: "${VPN_PASSWORD:?required}"
+# VPN_PASSWORD is optional: some SSL-VPN setups authenticate without a stored
+# password (or prompt at connect). Left empty, we still dial so the gateway's own
+# response tells us what it wants — instead of failing our precheck first.
+VPN_PASSWORD="${VPN_PASSWORD:-}"
+[ -z "$VPN_PASSWORD" ] && echo "[sidecar] ⚠ VPN_PASSWORD empty — attempting passwordless auth"
 VPN_TRUSTED_CERT="${VPN_TRUSTED_CERT:-}"
 READY_FILE="${READY_FILE:-/shared/vpn-ready}"
 SSH_JUMP="${SSH_JUMP:-}"
 SSH_KEY="${SSH_KEY:-}"
 SSH_FORWARDS="${SSH_FORWARDS:-}"
+SSH_PASSWORD="${SSH_PASSWORD:-}"
+SSH_PORT="${SSH_PORT:-}"
 
 host="${VPN_GATEWAY%%:*}"
 port="${VPN_GATEWAY##*:}"
@@ -70,7 +78,9 @@ rm -f "$READY_FILE"
 
 # ---- dial --------------------------------------------------------------------
 echo "[sidecar] dialing openfortivpn → ${host}:${port}"
-openfortivpn -c "$conf" >/tmp/vpn.log 2>&1 &
+# </dev/null: if the gateway prompts for a password (e.g. passwordless attempt that
+# it rejects), openfortivpn gets EOF and fails fast instead of hanging on a TTY.
+openfortivpn -c "$conf" </dev/null >/tmp/vpn.log 2>&1 &
 vpn_pid=$!
 
 # ---- wait for the tunnel -----------------------------------------------------
@@ -98,13 +108,46 @@ if [ -n "$SSH_FORWARDS" ]; then
     exit 1
   }
   ssh_args=(-N -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes)
-  [ -n "$SSH_KEY" ] && ssh_args+=(-i "$SSH_KEY")
+  [ -n "$SSH_PORT" ] && ssh_args+=(-p "$SSH_PORT")
   IFS=',' read -ra _fwds <<<"$SSH_FORWARDS"
   for f in "${_fwds[@]}"; do ssh_args+=(-L "$f"); done
-  echo "[sidecar] opening SSH tunnels via ${SSH_JUMP}: ${SSH_FORWARDS}"
-  ssh "${ssh_args[@]}" "$SSH_JUMP" &
-  extra_pids+=($!)
-  sleep 2
+
+  if [ -n "$SSH_PASSWORD" ]; then
+    # password auth: the client disables pubkey (PubkeyAuthentication=no); sshpass
+    # feeds the password via the SSHPASS env var so it never lands in `ps`.
+    ssh_args+=(-o PubkeyAuthentication=no)
+    echo "[sidecar] opening SSH tunnels (password auth) via ${SSH_JUMP}: ${SSH_FORWARDS}"
+    SSHPASS="$SSH_PASSWORD" sshpass -e ssh "${ssh_args[@]}" "$SSH_JUMP" </dev/null &
+  else
+    [ -n "$SSH_KEY" ] && ssh_args+=(-i "$SSH_KEY")
+    echo "[sidecar] opening SSH tunnels (key auth) via ${SSH_JUMP}: ${SSH_FORWARDS}"
+    ssh "${ssh_args[@]}" "$SSH_JUMP" </dev/null &
+  fi
+  ssh_pid=$!
+  extra_pids+=("$ssh_pid")
+
+  # Wait for the local forward ports to actually accept connections. ssh binds them
+  # only AFTER host-key + auth complete, so a blind sleep races — the readiness
+  # marker would be written before the tunnels listen ("connection refused").
+  ssh_deadline=$((SECONDS + 30))
+  IFS=',' read -ra _wait_fwds <<<"$SSH_FORWARDS"
+  for f in "${_wait_fwds[@]}"; do
+    lport="${f%%:*}"
+    until (exec 3<>"/dev/tcp/127.0.0.1/${lport}") 2>/dev/null; do
+      kill -0 "$ssh_pid" 2>/dev/null || {
+        echo "[sidecar] ✗ SSH tunnel process died (check SSH_PASSWORD / SSH_JUMP / SSH_FORWARDS)"
+        exit 1
+      }
+      [ "$SECONDS" -ge "$ssh_deadline" ] && {
+        echo "[sidecar] ✗ SSH forward :${lport} not listening after 30s"
+        exit 1
+      }
+      sleep 1
+    done
+    exec 3>&- 2>/dev/null || true
+    echo "[sidecar] ✓ SSH forward :${lport} up"
+  done
+  echo "[sidecar] ✓ SSH tunnels up"
 fi
 
 # ---- signal readiness + surface the VPN log ----------------------------------

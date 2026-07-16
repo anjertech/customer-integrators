@@ -27,6 +27,8 @@ services:
       VPN_TRUSTED_CERT: ${VPN_TRUSTED_CERT:-}
       SSH_JUMP: ${SSH_JUMP:-}
       SSH_FORWARDS: ${SSH_FORWARDS:-}
+      SSH_PASSWORD: ${SSH_PASSWORD:-}
+      SSH_PORT: ${SSH_PORT:-}
     volumes:
       - shared:/shared
       # mount an SSH key here if you use no_route SSH tunnels:
@@ -43,13 +45,35 @@ services:
     environment:
       WAIT_FOR_VPN: "true"
       READY_FILE: /shared/vpn-ready
-      SCRIPT_PATH: /scripts/test_oracle_connection.py
-      ORACLE_HOST: ${ORACLE_HOST}
+      # Default is the full Oracle smoke test; set SCRIPT_PATH=/scripts/vpn_netcheck.py
+      # in .env to prove ONLY the VPN (tunnel up + worker inside the network, no DB).
+      SCRIPT_PATH: ${SCRIPT_PATH:-/scripts/test_oracle_connection.py}
+      # Local-mode script arguments, shell-style, e.g. SCRIPT_ARGS="--all" or
+      # SCRIPT_ARGS="--db P_CUALE_KIA_LINDAVISTA" (production derives args from tenants.json)
+      SCRIPT_ARGS: ${SCRIPT_ARGS:-}
+      # VPN-only probe target (used by vpn_netcheck.py; ignored by the Oracle test):
+      TARGET_HOST: ${TARGET_HOST:-}
+      TARGET_PORT: ${TARGET_PORT:-1521}
+      ORACLE_HOST: ${ORACLE_HOST:-}
       ORACLE_PORT: ${ORACLE_PORT:-1521}
       ORACLE_SERVICE: ${ORACLE_SERVICE:-}
       ORACLE_SID: ${ORACLE_SID:-}
-      ORACLE_USER: ${ORACLE_USER}
-      ORACLE_PASSWORD: ${ORACLE_PASSWORD}
+      ORACLE_USER: ${ORACLE_USER:-}
+      ORACLE_PASSWORD: ${ORACLE_PASSWORD:-}
+      # Tunnel DSN knobs for test_oracle_tunnel.py (CMAN SOURCE_ROUTE / no_route):
+      TUNNEL_HOST: ${TUNNEL_HOST:-127.0.0.1}
+      CMAN_PORT: ${CMAN_PORT:-}
+      DIRECT_PORT: ${DIRECT_PORT:-}
+      NO_ROUTE: ${NO_ROUTE:-}
+      CONNECT_TIMEOUT: ${CONNECT_TIMEOUT:-}
+      # SQL Server / ODBC (universidad/mxa) — full string OR discrete parts:
+      ODBC_CONNECTION_STRING: ${ODBC_CONNECTION_STRING:-}
+      UNIVERSIDAD_ODBC_CONNECTION_STRING: ${UNIVERSIDAD_ODBC_CONNECTION_STRING:-}
+      MSSQL_HOST: ${MSSQL_HOST:-}
+      MSSQL_PORT: ${MSSQL_PORT:-1433}
+      MSSQL_DATABASE: ${MSSQL_DATABASE:-}
+      MSSQL_USER: ${MSSQL_USER:-}
+      MSSQL_PASSWORD: ${MSSQL_PASSWORD:-}
     volumes:
       - shared:/shared
       - ./scripts:/scripts:ro
